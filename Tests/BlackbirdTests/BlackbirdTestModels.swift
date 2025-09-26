@@ -131,6 +131,8 @@ struct TypeTest: BlackbirdModel {
     @BlackbirdColumn var typeDataNotNull: Data
     
     enum RepresentableIntEnum: Int, BlackbirdIntegerEnum {
+        typealias RawValue = Int
+        
         case zero = 0
         case one = 1
         case two = 2
@@ -140,6 +142,8 @@ struct TypeTest: BlackbirdModel {
     @BlackbirdColumn var typeIntEnumNullWithValue: RepresentableIntEnum?
 
     enum RepresentableStringEnum: String, BlackbirdStringEnum {
+        typealias RawValue = String
+        
         case empty = ""
         case zero = "zero"
         case one = "one"
@@ -150,6 +154,8 @@ struct TypeTest: BlackbirdModel {
     @BlackbirdColumn var typeStringEnumNullWithValue: RepresentableStringEnum?
 
     enum RepresentableIntNonZero: Int, BlackbirdIntegerEnum {
+        typealias RawValue = Int
+        
         case one = 1
         case two = 2
     }
@@ -159,6 +165,8 @@ struct TypeTest: BlackbirdModel {
     @BlackbirdColumn var typeIntNonZeroEnumNullWithValue: RepresentableIntNonZero?
 
     enum RepresentableStringNonEmpty: String, BlackbirdStringEnum {
+        typealias RawValue = String
+        
         case one = "one"
         case two = "two"
     }
