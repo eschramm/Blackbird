@@ -35,7 +35,7 @@ import SwiftUI
 @preconcurrency import Combine
 
 extension EnvironmentValues {
-    @Entry var blackbirdDatabase: Blackbird.Database = try! .inMemoryDatabase()
+    @Entry public var blackbirdDatabase: Blackbird.Database = try! .inMemoryDatabase()
 }
 
 extension Blackbird {

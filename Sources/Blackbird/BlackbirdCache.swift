@@ -36,6 +36,7 @@
 extension Blackbird.Database {
     public struct CachePerformanceMetrics: Sendable {
         public let hits: Int
+        public let hitsCostSavings: Int
         public let misses: Int
         public let writes: Int
         public let rowInvalidations: Int
@@ -43,6 +44,7 @@ extension Blackbird.Database {
         public let tableInvalidations: Int
         public let evictions: Int
         public let lowMemoryFlushes: Int
+        public let estimatedBytesCost: Int
     }
     
     public func cachePerformanceMetricsByTableName() -> [String: CachePerformanceMetrics] { cache.performanceMetrics() }
@@ -56,7 +58,20 @@ extension Blackbird.Database {
                 totalRequests == 0 ? "0%" :
                 "\(Int(100.0 * Double(metrics.hits) / Double(totalRequests)))%"
                 
-            print("\(tableName): \(metrics.hits) hits (\(hitPercentStr)), \(metrics.misses) misses, \(metrics.writes) writes, \(metrics.rowInvalidations) row invalidations, \(metrics.queryInvalidations) query invalidations, \(metrics.tableInvalidations) table invalidations, \(metrics.evictions) evictions, \(metrics.lowMemoryFlushes) low-memory flushes")
+            let output = """
+                         \(tableName): 
+                           - Hits               : \(metrics.hits) (\(hitPercentStr))
+                           - HitsCostSavings    : \(metrics.hitsCostSavings.formatted(.byteCount(style: .memory)))
+                           - Misses             : \(metrics.misses)
+                           - Writes             : \(metrics.writes)
+                           - Row Invalidations  : \(metrics.rowInvalidations)
+                           - Query Invalidations: \(metrics.queryInvalidations)
+                           - Table Invalidations: \(metrics.tableInvalidations)
+                           - Evictions          : \(metrics.evictions)
+                           - Low-Memory Flushes : \(metrics.lowMemoryFlushes)
+                           - EstimatedBytesCost : \(metrics.estimatedBytesCost.formatted(.byteCount(style: .memory)))
+                         """
+            print(output)
         }
     }
 
@@ -74,6 +89,10 @@ extension Blackbird.Database {
             public func value() -> T {
                 lastAccessed = mach_absolute_time()
                 return _value
+            }
+            
+            public var estimatedCost: Int {
+                return MemoryLayout<T>.size + MemoryLayout<AccessTime>.size
             }
         }
 
@@ -111,6 +130,7 @@ extension Blackbird.Database {
             
             // Performance counters
             private var hits: Int = 0
+            private var hitsCostSavings: Int = 0
             private var misses: Int = 0
             private var writes: Int = 0
             private var rowInvalidations: Int = 0
@@ -119,6 +139,12 @@ extension Blackbird.Database {
             private var evictions: Int = 0
             private var lowMemoryFlushes: Int = 0
             
+            private func estimatedBytesCost() -> Int {
+                var output = ((modelsByPrimaryKey.values.reduce(0) { $1.estimatedCost + $0 }) + (MemoryLayout<Blackbird.Value>.size * cachedQueries.count))
+                output += ((cachedQueries.values.reduce(0) { $1.estimatedCost + $0 }) + (cachedQueries.keys.reduce(0) { ($1.count * MemoryLayout<Blackbird.Value>.size) + $0 }))
+                return output
+            }
+            
             func get(primaryKey: Blackbird.Value) -> (any BlackbirdModel)? {
                 lock.lock()
                 defer { lock.unlock() }
@@ -126,6 +152,7 @@ extension Blackbird.Database {
                 if let hit = modelsByPrimaryKey[primaryKey] {
                     hit.lastAccessed = mach_absolute_time()
                     hits += 1
+                    hitsCostSavings += MemoryLayout<any BlackbirdModel>.size
                     return hit.value()
                 } else {
                     misses += 1
@@ -143,6 +170,7 @@ extension Blackbird.Database {
                     if let hit = modelsByPrimaryKey[key] { hitResults.append(hit.value()) } else { missedKeys.append(key) }
                 }
                 hits += hitResults.count
+                hitsCostSavings += (MemoryLayout<any BlackbirdModel>.size * hitResults.count)
                 misses += missedKeys.count
                 return (hits: hitResults, missedKeys: missedKeys)
             }
@@ -153,6 +181,7 @@ extension Blackbird.Database {
 
                 if let hit = cachedQueries[cacheKey] {
                     hits += 1
+                    hitsCostSavings += MemoryLayout<any BlackbirdModel>.size
                     return .hit(value: hit.value())
                 } else {
                     misses += 1
@@ -172,17 +201,17 @@ extension Blackbird.Database {
                 }
             }
             
-            func addQuery(cacheKey: [Blackbird.Value], result: Sendable?, pruneToLimit: Int? = nil) {
+            func addQuery(cacheKey: [Blackbird.Value], result: Sendable, pruneToLimit: Int? = nil) {
                 lock.lock()
                 defer { lock.unlock() }
 
-                cachedQueries[cacheKey] = CacheEntry(result)
+                let entry = CacheEntry(result)
+                cachedQueries[cacheKey] = entry
                 writes += 1
 
                 if let pruneToLimit {
                     inLock_prune(entryLimit: pruneToLimit)
                 }
-            
             }
 
             func delete(primaryKey: Blackbird.Value) {
@@ -254,6 +283,7 @@ extension Blackbird.Database {
                 defer { lock.unlock() }
 
                 hits = 0
+                hitsCostSavings = 0
                 misses = 0
                 writes = 0
                 evictions = 0
@@ -267,7 +297,7 @@ extension Blackbird.Database {
                 lock.lock()
                 defer { lock.unlock() }
 
-                return CachePerformanceMetrics(hits: hits, misses: misses, writes: writes, rowInvalidations: rowInvalidations, queryInvalidations: queryInvalidations, tableInvalidations: tableInvalidations, evictions: evictions, lowMemoryFlushes: lowMemoryFlushes)
+                return CachePerformanceMetrics(hits: hits, hitsCostSavings: hitsCostSavings, misses: misses, writes: writes, rowInvalidations: rowInvalidations, queryInvalidations: queryInvalidations, tableInvalidations: tableInvalidations, evictions: evictions, lowMemoryFlushes: lowMemoryFlushes, estimatedBytesCost: estimatedBytesCost())
             }
         }
     
@@ -378,18 +408,33 @@ extension BlackbirdModel {
         let cacheLimit = Self.cacheLimit
         if cacheLimit > 0, let pkValues = try? self.primaryKeyValues(), pkValues.count == 1, let pk = try? Blackbird.Value.fromAny(pkValues.first!) {
             database.cache.writeModel(tableName: Self.tableName, primaryKey: pk, instance: self, entryLimit: cacheLimit)
+            let logActivity = database.options.contains(.debugPrintCacheActivity)
+            if logActivity {
+                print("[BlackbirdModel] Cache update/write ✍️ - \(Self.tableName) (\(MemoryLayout<Self>.size) cost)")
+            }
         }
     }
 
     internal func _deleteCachedInstance(for database: Blackbird.Database) {
         if Self.cacheLimit > 0, let pkValues = try? self.primaryKeyValues(), pkValues.count == 1, let pk = try? Blackbird.Value.fromAny(pkValues.first!) {
             database.cache.deleteModel(tableName: Self.tableName, primaryKey: pk)
+            let logActivity = database.options.contains(.debugPrintCacheActivity)
+            if logActivity {
+                print("[BlackbirdModel] Cache delete ❌ - \(Self.tableName) (\(MemoryLayout<Self>.size) cost)")
+            }
         }
     }
 
     internal static func _cachedInstance(for database: Blackbird.Database, primaryKeyValue: Blackbird.Value) -> Self? {
         guard Self.cacheLimit > 0 else { return nil }
-        return database.cache.readModel(tableName: Self.tableName, primaryKey: primaryKeyValue) as? Self
+        let logActivity = database.options.contains(.debugPrintCacheActivity)
+        if let cachedResult = database.cache.readModel(tableName: Self.tableName, primaryKey: primaryKeyValue) as? Self {
+            if logActivity { print("[BlackbirdModel] Cache hit ✅ - \(Self.tableName) (\(MemoryLayout<Self>.size) cost)") }
+            return cachedResult
+        } else {
+            if logActivity { print("[BlackbirdModel] Cache miss ⏳ - \(Self.tableName) (\(MemoryLayout<Self>.size) cost)") }
+            return nil
+        }
     }
 
     internal static func _cachedInstances(for database: Blackbird.Database, primaryKeyValues: [Blackbird.Value]) -> (hits: [Self], missedKeys: [Blackbird.Value]) {
@@ -400,6 +445,15 @@ extension BlackbirdModel {
         for hit in results.hits {
             guard let hit = hit as? Self else { return (hits: [], missedKeys: primaryKeyValues) }
             hits.append(hit)
+        }
+        let logActivity = database.options.contains(.debugPrintCacheActivity)
+        if logActivity {
+            if !hits.isEmpty {
+                print("[BlackbirdModel] Cache hits ✅ - \(Self.tableName) [\(hits.count)] (\(MemoryLayout<Self>.size * hits.count) cost)")
+            }
+            if !results.missedKeys.isEmpty {
+                print("[BlackbirdModel] Cache misses ⏳- \(Self.tableName) [\(results.missedKeys.count)] (\(MemoryLayout<Self>.size * hits.count) cost)")
+            }
         }
         return (hits: hits, missedKeys: results.missedKeys)
     }

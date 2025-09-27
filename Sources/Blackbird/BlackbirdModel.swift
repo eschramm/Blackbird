@@ -1078,6 +1078,10 @@ extension BlackbirdModel {
         let sql = "DELETE FROM `\(Self.tableName)` WHERE \(andClauses.joined(separator: " AND "))"
         try core.query(sql, arguments: values)
         self._deleteCachedInstance(for: database)
+        let logActivity = database.options.contains(.debugPrintCacheActivity)
+        if logActivity {
+            print("[BlackbirdModel] Cache delete ❌ - \(Self.tableName) (\(MemoryLayout<Self>.size) cost)")
+        }
     }
 
     fileprivate static func _cacheableResult<T: Sendable>(database: Blackbird.Database, tableName: String, query: String, arguments: [Blackbird.Value], resultFetcher: ((Blackbird.Database) async throws -> T)) async throws -> T {
@@ -1085,10 +1089,21 @@ extension BlackbirdModel {
         guard cacheLimit > 0 else { return try await resultFetcher(database) }
         var cacheKey: [Blackbird.Value] = [.text(query)]
         cacheKey.append(contentsOf: arguments)
+        let logActivity = database.options.contains(.debugPrintCacheActivity)
         
-        if case .hit(let value) = database.cache.readQueryResult(tableName: tableName, cacheKey: cacheKey), let cachedResult = value as? T { return cachedResult }
+        if case .hit(let value) = database.cache.readQueryResult(tableName: tableName, cacheKey: cacheKey), let cachedResult = value as? T {
+            if logActivity {
+                print("[BlackbirdModel] Cache hit ✅ - \(Self.tableName) (\(MemoryLayout<T>.size) cost)")
+            }
+            return cachedResult
+        }
 
         let result = try await resultFetcher(database)
+        
+        if logActivity {
+            print("[BlackbirdModel] Cache miss/update/write ✍️ - \(Self.tableName) (\(MemoryLayout<T>.size) cost)")
+        }
+        
         database.cache.writeQueryResult(tableName: tableName, cacheKey: cacheKey, result: result, entryLimit: cacheLimit)
         return result
     }
@@ -1098,10 +1113,21 @@ extension BlackbirdModel {
         guard cacheLimit > 0 else { return try resultFetcher(database, core) }
         var cacheKey: [Blackbird.Value] = [.text(query)]
         cacheKey.append(contentsOf: arguments)
+        let logActivity = database.options.contains(.debugPrintCacheActivity)
         
-        if case .hit(let value) = database.cache.readQueryResult(tableName: tableName, cacheKey: cacheKey), let cachedResult = value as? T { return cachedResult }
+        if case .hit(let value) = database.cache.readQueryResult(tableName: tableName, cacheKey: cacheKey), let cachedResult = value as? T {
+            if logActivity {
+                print("[BlackbirdModel] Cache hit ✅ - \(Self.tableName) (\(MemoryLayout<T>.size) cost)")
+            }
+            return cachedResult
+        }
         
         let result = try resultFetcher(database, core)
+        
+        if logActivity {
+            print("[BlackbirdModel] Cache miss/update/write ✍️ - \(Self.tableName) (\(MemoryLayout<T>.size) cost)")
+        }
+        
         database.cache.writeQueryResult(tableName: tableName, cacheKey: cacheKey, result: result, entryLimit: cacheLimit)
         return result
     }

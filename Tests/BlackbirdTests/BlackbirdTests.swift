@@ -1121,8 +1121,9 @@ final class BlackbirdTestTests: XCTestCase, @unchecked Sendable {
         var t = try await TestModel.read(from: db, id: 1)!
         XCTAssert(db.cachePerformanceMetricsByTableName()[TestModel.tableName]!.misses == 0)
         XCTAssert(db.cachePerformanceMetricsByTableName()[TestModel.tableName]!.hits == 1)
+        XCTAssert(db.cachePerformanceMetricsByTableName()[TestModel.tableName]!.hitsCostSavings == 40)
+        XCTAssert(db.cachePerformanceMetricsByTableName()[TestModel.tableName]!.estimatedBytesCost == 48_000)
         
-        db.resetCachePerformanceMetrics(tableName: TestModel.tableName)
         t.title = "new"
         try await t.write(to: db)
         XCTAssert(db.cachePerformanceMetricsByTableName()[TestModel.tableName]!.writes == 1)
