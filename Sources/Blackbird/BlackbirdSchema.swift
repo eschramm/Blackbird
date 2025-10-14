@@ -435,7 +435,7 @@ extension Blackbird {
 }
 
 
-internal extension String {
+public extension String {
     func removingLeadingUnderscore() -> String {
         guard self.hasPrefix("_"), self.count > 1, let firstCharIndex = self.indices.first else { return self }
         return String(self.suffix(from: self.index(after: firstCharIndex)))

@@ -7,11 +7,13 @@
 
 import Foundation
 
-public enum UUIDError: Error {
+// also in EWSLibrary
+enum UUIDError: Error {
     case wrongNumberOfBytesShouldBe16(Int)
 }
 
-public extension UUID {
+// also in EWSLibrary
+extension UUID {
     
     init(data: Data) throws {
         if data.count == MemoryLayout<uuid_t>.size {
