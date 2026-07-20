@@ -675,6 +675,21 @@ extension Blackbird {
 
             private let asyncTransactionSemaphore = Blackbird.Semaphore(value: 1)
 
+            // Rolls back to a savepoint without throwing.
+            //
+            // Some SQLite errors (SQLITE_IOERR, SQLITE_FULL, SQLITE_NOMEM, SQLITE_BUSY with an
+            // upgraded lock) cause SQLite to automatically roll back the entire transaction. The
+            // savepoint no longer exists at that point, so this ROLLBACK fails with "no such
+            // savepoint: N". Throwing that would replace the error that actually caused the
+            // failure, which is the one the caller needs to see.
+            private func rollbackToSavepoint(_ transactionID: Int64) {
+                do {
+                    try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                } catch {
+                    if debugPrintEveryQuery { print("[Blackbird.Database] rollback to savepoint \(transactionID) failed (transaction was likely already rolled back by SQLite): \(error)") }
+                }
+            }
+
             // Exactly like the function below, but accepts an async action
             public func cancellableTransaction<R: Sendable>(_ action: (@Sendable (_ core: isolated Blackbird.Database.Core) async throws -> R) ) async throws -> Blackbird.TransactionResult<R> {
                 await asyncTransactionSemaphore.wait()
@@ -700,11 +715,11 @@ extension Blackbird {
                     try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
-                    try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                    rollbackToSavepoint(transactionID)
                     cache?.invalidate()
                     return .rolledBack
                 } catch {
-                    try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                    rollbackToSavepoint(transactionID)
                     cache?.invalidate()
                     throw error
                 }
@@ -732,11 +747,11 @@ extension Blackbird {
                     try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
-                    try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                    rollbackToSavepoint(transactionID)
                     cache?.invalidate()
                     return .rolledBack
                 } catch {
-                    try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                    rollbackToSavepoint(transactionID)
                     cache?.invalidate()
                     throw error
                 }
