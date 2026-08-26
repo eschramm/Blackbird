@@ -34,8 +34,31 @@
 import SwiftUI
 @preconcurrency import Combine
 
+extension Blackbird.Database {
+    /// Stand-in for a `\.blackbirdDatabase` environment value that was never injected.
+    ///
+    /// Created lazily, so it only ever exists if something actually read the environment value
+    /// without a database having been set — which makes its creation the signal that something is
+    /// misconfigured, and the one place worth warning from.
+    ///
+    /// Being a `static let` also matters: the `@Entry` default expression is evaluated on *every*
+    /// read of an uninjected value, so an inline `try! .inMemoryDatabase()` handed out a brand-new
+    /// database each time. A view that wrote and then read wouldn't see its own write, and each
+    /// access leaked a connection.
+    public static let unconfigured: Blackbird.Database = {
+        print("[Blackbird] ⚠️ No database was injected into the SwiftUI environment; falling back "
+            + "to a throwaway in-memory database. Nothing written to it will persist. Set "
+            + ".environment(\\.blackbirdDatabase, …) on your root view.")
+        return try! .inMemoryDatabase()
+    }()
+}
+
 extension EnvironmentValues {
-    @Entry public var blackbirdDatabase: Blackbird.Database = try! .inMemoryDatabase()
+    /// The ``Blackbird/Database`` to use with `@BlackbirdLive…` property wrappers.
+    ///
+    /// Non-optional for ergonomics. Inject it on your root view; if you don't, reads fall back to
+    /// ``Blackbird/Database/unconfigured``, which warns once on the console.
+    @Entry public var blackbirdDatabase: Blackbird.Database = .unconfigured
 }
 
 extension Blackbird {
