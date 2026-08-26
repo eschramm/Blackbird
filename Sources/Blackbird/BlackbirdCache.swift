@@ -304,6 +304,25 @@ extension Blackbird.Database {
         private let entriesByTableName = Blackbird.Locked<[String: TableCache]>([:])
     
         internal func invalidate(tableName: String? = nil, primaryKeyValue: Blackbird.Value? = nil) {
+            // NOTE: this differs from Marco's approach in origin/fable - we use the cache
+            // heavily in StattyCaddy and this preserves it but also prevents readers from seeing
+            // writes that are in transaction and haven't been committed yet.
+            //
+            // Drop anything buffered that this invalidation covers, so a commit can't apply a
+            // value that was invalidated after it was buffered.
+            pending.withLock { p in
+                guard p.depth > 0 else { return }
+                guard let tableName else {
+                    p.clear()
+                    return
+                }
+                p.queries.removeAll { $0.tableName == tableName }
+                if let primaryKeyValue {
+                    p.models.removeAll { $0.tableName == tableName && $0.primaryKey == primaryKeyValue }
+                } else {
+                    p.models.removeAll { $0.tableName == tableName }
+                }
+            }
             entriesByTableName.withLock {
                 if let tableName {
                     $0[tableName]?.invalidate(primaryKeyValue: primaryKeyValue)
@@ -339,7 +358,69 @@ extension Blackbird.Database {
             }
         }
 
+        // Cache population is deferred while a transaction is open. An entry written
+        // mid-transaction would expose uncommitted data to readers on other threads, which
+        // consult this cache without waiting for the database actor or the transaction barrier.
+        // Pending entries are held here instead and applied when the outermost transaction
+        // commits, or dropped when it rolls back — so the cache stays warm without ever
+        // publishing a value that isn't on disk.
+        private struct PendingWrites {
+            var depth = 0
+            var models: [(tableName: String, primaryKey: Blackbird.Value, instance: any BlackbirdModel, entryLimit: Int)] = []
+            var queries: [(tableName: String, cacheKey: [Blackbird.Value], result: Sendable, entryLimit: Int)] = []
+
+            mutating func clear() {
+                models.removeAll(keepingCapacity: false)
+                queries.removeAll(keepingCapacity: false)
+            }
+        }
+        private let pending = Blackbird.Locked(PendingWrites())
+
+        internal func beginTransaction() { pending.withLock { $0.depth += 1 } }
+
+        // Applies what the transaction buffered, if it committed and it was the outermost one.
+        // A rollback drops everything pending: an inner savepoint's rollback can undo work
+        // buffered by the enclosing transaction too, so partial retention isn't safe.
+        internal func endTransaction(committed: Bool) {
+            let toApply: PendingWrites? = pending.withLock { p in
+                p.depth = max(0, p.depth - 1)
+                if !committed {
+                    p.clear()
+                    return nil
+                }
+                guard p.depth == 0, !(p.models.isEmpty && p.queries.isEmpty) else { return nil }
+                let snapshot = p
+                p.clear()
+                return snapshot
+            }
+            // Applied outside the pending lock: these take the entry lock, and that order
+            // (pending, then entries) must never reverse.
+            guard let toApply else { return }
+            for m in toApply.models {
+                addModel(tableName: m.tableName, primaryKey: m.primaryKey, instance: m.instance, entryLimit: m.entryLimit)
+            }
+            for q in toApply.queries {
+                addQueryResult(tableName: q.tableName, cacheKey: q.cacheKey, result: q.result, entryLimit: q.entryLimit)
+            }
+        }
+
         internal func writeModel(tableName: String, primaryKey: Blackbird.Value, instance: any BlackbirdModel, entryLimit: Int) {
+            let deferred: Bool = pending.withLock { p in
+                guard p.depth > 0 else { return false }
+                p.models.append((tableName, primaryKey, instance, entryLimit))
+                return true
+            }
+            if deferred {
+                // Evict the live entry now. Reads inside this transaction must fall through to
+                // the database — where the transaction sees its own uncommitted writes — rather
+                // than hit the pre-transaction value still sitting in the cache.
+                deleteModel(tableName: tableName, primaryKey: primaryKey)
+                return
+            }
+            addModel(tableName: tableName, primaryKey: primaryKey, instance: instance, entryLimit: entryLimit)
+        }
+
+        private func addModel(tableName: String, primaryKey: Blackbird.Value, instance: any BlackbirdModel, entryLimit: Int) {
             entriesByTableName.withLock {
                 let tableCache: TableCache
                 if let existingCache = $0[tableName] { tableCache = existingCache }
@@ -378,6 +459,16 @@ extension Blackbird.Database {
         }
 
         internal func writeQueryResult(tableName: String, cacheKey: [Blackbird.Value], result: Sendable, entryLimit: Int) {
+            let deferred: Bool = pending.withLock { p in
+                guard p.depth > 0 else { return false }
+                p.queries.append((tableName, cacheKey, result, entryLimit))
+                return true
+            }
+            if deferred { return }
+            addQueryResult(tableName: tableName, cacheKey: cacheKey, result: result, entryLimit: entryLimit)
+        }
+
+        private func addQueryResult(tableName: String, cacheKey: [Blackbird.Value], result: Sendable, entryLimit: Int) {
             entriesByTableName.withLock {
                 let tableCache: TableCache
                 if let existingCache = $0[tableName] { tableCache = existingCache }

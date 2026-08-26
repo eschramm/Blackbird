@@ -403,15 +403,19 @@ extension Blackbird {
         public init(value: Int = 0) { state = Locked(State(value: value)) }
         
         public func wait() async {
-            let wait = state.withLock { state in
-                state.value -= 1
-                return state.value < 0
-            }
-            
-            if wait {
-                await withCheckedContinuation { continuation in
-                    state.withLock { $0.waiting.append(continuation) }
+            // The decrement and the continuation enqueue must be a single atomic operation:
+            // a signal() landing between them would see an empty waiting list and the wakeup
+            // would be lost, parking this task (and the semaphore) forever.
+            await withCheckedContinuation { continuation in
+                let resumeNow: Bool = state.withLock { state in
+                    state.value -= 1
+                    if state.value < 0 {
+                        state.waiting.append(continuation)
+                        return false
+                    }
+                    return true
                 }
+                if resumeNow { continuation.resume() }
             }
         }
 

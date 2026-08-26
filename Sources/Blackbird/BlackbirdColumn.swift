@@ -51,10 +51,12 @@ internal protocol ColumnWrapper: WrappedType {
     private var _value: T
     internal final class ColumnState<U>: @unchecked Sendable /* unchecked due to external locking in all uses */ {
         var hasChanged: Bool
+        var lastSavedValue: U?
         weak var lastUsedDatabase: Blackbird.Database?
-        
-        init(hasChanged: Bool, lastUsedDatabase: Blackbird.Database? = nil) {
+
+        init(hasChanged: Bool, lastSavedValue: U? = nil, lastUsedDatabase: Blackbird.Database? = nil) {
             self.hasChanged = hasChanged
+            self.lastSavedValue = lastSavedValue
             self.lastUsedDatabase = lastUsedDatabase
         }
     }
@@ -85,14 +87,18 @@ internal protocol ColumnWrapper: WrappedType {
     public func hasChanged(in database: Blackbird.Database) -> Bool {
         state.withLock { state in
             if state.lastUsedDatabase != database { return true }
-            return state.hasChanged
+            if state.hasChanged { return true }
+            // The state above is shared by every copy of an instance, so a sibling copy's
+            // save clearing it must not hide this copy's own different, unsaved value.
+            return state.lastSavedValue != self._value
         }
     }
-    
+
     internal func clearHasChanged(in database: Blackbird.Database) {
         state.withLock { state in
             state.lastUsedDatabase = database
             state.hasChanged = false
+            state.lastSavedValue = self._value
         }
     }
 
@@ -106,7 +112,7 @@ internal protocol ColumnWrapper: WrappedType {
         let value = try container.decode(T.self)
         _value = value
         if let sqliteDecoder = decoder as? BlackbirdSQLiteDecoder {
-            state = Blackbird.Locked(ColumnState(hasChanged: false, lastUsedDatabase: sqliteDecoder.database))
+            state = Blackbird.Locked(ColumnState(hasChanged: false, lastSavedValue: value, lastUsedDatabase: sqliteDecoder.database))
         } else {
             state = Blackbird.Locked(ColumnState(hasChanged: true, lastUsedDatabase: nil))
         }

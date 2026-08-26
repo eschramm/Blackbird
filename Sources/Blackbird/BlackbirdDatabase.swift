@@ -675,16 +675,32 @@ extension Blackbird {
 
             private let asyncTransactionSemaphore = Blackbird.Semaphore(value: 1)
 
-            // Rolls back to a savepoint without throwing.
+            // How many transactions are currently open on this connection. Work done inside one
+            // is not durable until the outermost transaction commits, so anything cached in
+            // memory to reflect a committed database state must wait for this to return to 0.
+            internal private(set) var transactionDepth = 0
+
+            // Rolls back to a savepoint, and releases it, without throwing.
+            //
+            // ROLLBACK TO does not end the transaction that an outermost SAVEPOINT opened: the
+            // savepoint must also be RELEASEd, or the connection stays inside an open transaction
+            // forever. Every subsequent write then lands in that transaction rather than on disk —
+            // still visible to this connection, so nothing looks wrong — and is discarded when the
+            // connection closes.
             //
             // Some SQLite errors (SQLITE_IOERR, SQLITE_FULL, SQLITE_NOMEM, SQLITE_BUSY with an
             // upgraded lock) cause SQLite to automatically roll back the entire transaction. The
             // savepoint no longer exists at that point, so this ROLLBACK fails with "no such
-            // savepoint: N". Throwing that would replace the error that actually caused the
-            // failure, which is the one the caller needs to see.
+            // savepoint: N" — and the transaction has already ended, so there is nothing left to
+            // release. Throwing that would replace the error that actually caused the failure,
+            // which is the one the caller needs to see.
+            //
+            // RELEASE runs only if ROLLBACK TO succeeded: releasing a savepoint whose rollback
+            // failed would commit the very work that was supposed to be undone.
             private func rollbackToSavepoint(_ transactionID: Int64) {
                 do {
                     try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
+                    try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
                 } catch {
                     if debugPrintEveryQuery { print("[Blackbird.Database] rollback to savepoint \(transactionID) failed (transaction was likely already rolled back by SQLite): \(error)") }
                 }
@@ -709,10 +725,19 @@ extension Blackbird {
                 let spState = perfLog.begin(signpost: .cancellableTransaction, message: "Transaction ID: \(transactionID)")
                 defer { perfLog.end(state: spState) }
 
+                transactionDepth += 1
+                cache?.beginTransaction()
+                var committed = false
+                defer {
+                    cache?.endTransaction(committed: committed)
+                    transactionDepth -= 1
+                }
+
                 try execute("SAVEPOINT \"\(transactionID)\"")
                 do {
                     let result: R = try await action(self)
                     try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
+                    committed = true
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
                     rollbackToSavepoint(transactionID)
@@ -741,10 +766,19 @@ extension Blackbird {
                 let spState = perfLog.begin(signpost: .cancellableTransaction, message: "Transaction ID: \(transactionID)")
                 defer { perfLog.end(state: spState) }
 
+                transactionDepth += 1
+                cache?.beginTransaction()
+                var committed = false
+                defer {
+                    cache?.endTransaction(committed: committed)
+                    transactionDepth -= 1
+                }
+
                 try execute("SAVEPOINT \"\(transactionID)\"")
                 do {
                     let result: R = try action(self)
                     try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
+                    committed = true
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
                     rollbackToSavepoint(transactionID)

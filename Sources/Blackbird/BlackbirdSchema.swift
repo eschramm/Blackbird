@@ -308,9 +308,11 @@ extension Blackbird {
                 fatalError("BlackbirdModel \(String(describing: type)) is being queried before calling resolveSchema(in:) in a database with the .requireModelSchemaValidationBeforeUse option enabled")
             }
             
-            return try await database.core.transaction {
+            let resolution = try await database.core.transaction {
                 try _resolveWithDatabase(type: type, core: $0, validator: validator)
             }
+            if await database.core.transactionDepth == 0 { markResolved(database: database) }
+            return resolution
         }
 
         @discardableResult
@@ -322,7 +324,9 @@ extension Blackbird {
                 fatalError("BlackbirdModel \(String(describing: type)) is being queried before calling resolveSchema(in:) in a database with the .requireModelSchemaValidationBeforeUse option enabled")
             }
 
-            return try _resolveWithDatabase(type: type, core: core, validator: validator)
+            let resolution = try _resolveWithDatabase(type: type, core: core, validator: validator)
+            if core.transactionDepth == 0 { markResolved(database: database) }
+            return resolution
         }
 
         internal func _isAlreadyResolved<T>(type: T.Type, in database: Database) -> Bool {
@@ -419,17 +423,26 @@ extension Blackbird {
             // allow calling model to verify before committing
             if let validator { try validator(core) }
 
+            return resolution
+        }
+
+        // Records that this table's schema matches the model, so later queries can skip resolution.
+        //
+        // Only safe to call once the resolution is actually committed. Resolution may CREATE or
+        // ALTER the table, and if it ran inside a transaction that later rolls back, those changes
+        // are undone while this in-memory flag would survive — leaving every subsequent query
+        // against the table failing with "no such table" (or hitting a pre-migration schema) for
+        // the life of the connection.
+        private func markResolved(database: Database) {
             Self.resolvedTablesWithDatabases.withLock {
                 if $0[self] == nil { $0[self] = Set<Database.InstanceID>() }
                 $0[self]!.insert(database.id)
             }
-            
+
             Self.resolvedTableNamesInDatabases.withLock {
                 if $0[database.id] == nil { $0[database.id] = Set<String>() }
                 $0[database.id]!.insert(name)
             }
-            
-            return resolution
         }
     }
 }
