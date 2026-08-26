@@ -61,8 +61,49 @@ public protocol BlackbirdStorableAsText: Codable {
 }
 
 /// Internally represents data types compatible with SQLite's `BLOB` type.
+///
+/// Conform a `Codable` type to this to store it in a `BLOB` column without hand-rolling the
+/// encode/decode boilerplate at every call site. The two members are the whole contract: writes
+/// store `unifiedRepresentation()`, reads run it back through `from(unifiedRepresentation:)`.
+///
+/// The common case is a small `Codable` struct persisted as JSON — settings, options, a bag of
+/// derived values that doesn't deserve its own table:
+///
+///     struct Prefs: Codable, BlackbirdStorableAsData, BlackbirdColumnWrappable {
+///         var theme: String
+///         var fontSize: Int
+///
+///         func unifiedRepresentation() -> Data { (try? JSONEncoder().encode(self)) ?? Data() }
+///         static func from(unifiedRepresentation: Data) -> Self {
+///             (try? JSONDecoder().decode(Self.self, from: unifiedRepresentation)) ?? Self(theme: "light", fontSize: 12)
+///         }
+///         static func fromValue(_ value: Blackbird.Value) -> Self? {
+///             value.dataValue.map { from(unifiedRepresentation: $0) }
+///         }
+///     }
+///
+///     struct Account: BlackbirdModel {
+///         @BlackbirdColumn var id: Int
+///         @BlackbirdColumn var prefs: Prefs?   // note: optional — see below
+///     }
+///
+/// The representation doesn't have to be JSON — `UUID` conforms with a raw 16-byte
+/// representation (see `ESAdditions.swift`).
+///
+/// - Important: **Declare the column optional** unless the type can decode from empty `Data`.
+///   Schema resolution validates a model by decoding the table's column defaults, and the default
+///   for a `BLOB` column is an empty blob. A non-optional JSON-backed column therefore trips a
+///   `fatalError` at first use ("definition defaults do not decode to model"). An optional column
+///   decodes `NULL` before ever reaching this path.
+///
+/// - Note: `from(unifiedRepresentation:)` cannot throw, so handle malformed data by returning a
+///   sensible fallback rather than force-unwrapping — the stored blob may predate a change to the
+///   type's shape.
 public protocol BlackbirdStorableAsData: Codable {
+    /// The blob written to the database for this value.
     func unifiedRepresentation() -> Data
+
+    /// Reconstructs a value from the blob previously produced by ``unifiedRepresentation()``.
     static func from(unifiedRepresentation: Data) -> Self
 }
 

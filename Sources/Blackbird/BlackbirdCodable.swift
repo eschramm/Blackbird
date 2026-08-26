@@ -150,8 +150,12 @@ fileprivate struct BlackbirdSQLiteSingleValueDecodingContainer: SingleValueDecod
             }
         }
 
+        // Symmetric with the encode side, which stores `unifiedRepresentation()`: decode through
+        // the type's own `from(unifiedRepresentation:)` rather than assuming the blob is JSON.
+        // A type that *is* JSON-backed implements that hook as a JSONDecoder call; one that isn't
+        // (UUID's raw 16 bytes) would fail to parse as JSON.
         if let eT = T.self as? any BlackbirdStorableAsData.Type, let data = value.dataValue {
-            return try JSONDecoder().decode(eT, from: data) as! T
+            return eT.from(unifiedRepresentation: data) as! T
         }
         
         return try T(from: BlackbirdSQLiteDecoder(database: database, row: row, codingPath: codingPath))

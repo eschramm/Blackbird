@@ -993,7 +993,13 @@ extension Blackbird {
                                         sqliteError: .init(handle: dbHandle)
                                     )
                                 }
-                                row[columnNames[i]] = .text(String(cString: charPtr))
+                                // Read with an explicit byte count, matching the bind side:
+                                // String(cString:) stops at the first interior NUL, so a string
+                                // containing one would come back truncated even though SQLite
+                                // stored all of it. sqlite3_column_bytes must follow the
+                                // _text call to report the length in the same encoding.
+                                let textByteLength = Int(sqlite3_column_bytes(statementHandle.pointer, Int32(i)))
+                                row[columnNames[i]] = .text(String(decoding: UnsafeBufferPointer(start: charPtr, count: textByteLength), as: UTF8.self))
             
                             case SQLITE_BLOB:
                                 let byteLength = sqlite3_column_bytes(statementHandle.pointer, Int32(i))

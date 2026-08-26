@@ -214,4 +214,83 @@ final class BlackbirdRegressionTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(metrics?.misses, 0)
         await db.close()
     }
+
+    // MARK: Value conversion safety
+
+    // A malformed or truncated SQLite literal must return nil, not crash. A bare quote satisfies
+    // both the prefix and suffix checks, and an odd-length hex body indexes past its end.
+    func testMalformedSQLiteLiteralsDoNotCrash() {
+        XCTAssertNil(Blackbird.Value.fromSQLiteLiteral("'"))
+        XCTAssertNil(Blackbird.Value.fromSQLiteLiteral("X'"))
+        XCTAssertNil(Blackbird.Value.fromSQLiteLiteral("X'A'"))
+        XCTAssertEqual(Blackbird.Value.fromSQLiteLiteral("''"), .text(""))
+        XCTAssertEqual(Blackbird.Value.fromSQLiteLiteral("NULL"), .null)
+    }
+
+    // Int(d) traps on NaN, infinity, and doubles beyond Int's range.
+    func testOutOfRangeDoubleConversionsReturnNil() {
+        XCTAssertNil(Blackbird.Value.double(.nan).intValue)
+        XCTAssertNil(Blackbird.Value.double(.infinity).intValue)
+        XCTAssertNil(Blackbird.Value.double(1e300).intValue)
+        XCTAssertNil(Blackbird.Value.double(.nan).int64Value)
+        XCTAssertNil(Blackbird.Value.double(-.infinity).int64Value)
+        XCTAssertEqual(Blackbird.Value.double(3.7).intValue, 3)
+        XCTAssertEqual(Blackbird.Value.double(-3.7).intValue, -3)
+    }
+
+    // Any nonzero integer is true, including negatives.
+    func testNegativeIntegersAreTrue() {
+        XCTAssertEqual(Blackbird.Value.integer(-1).boolValue, true)
+        XCTAssertEqual(Blackbird.Value.integer(1).boolValue, true)
+        XCTAssertEqual(Blackbird.Value.integer(0).boolValue, false)
+        XCTAssertEqual(Blackbird.Value.double(-1).boolValue, true)
+    }
+
+    // A -1 (C-string) bind length truncates at the first interior NUL.
+    func testStringWithInteriorNulRoundTrips() async throws {
+        let db = try Blackbird.Database(path: sqliteFilename)
+        let title = "before\u{0}after"
+        try await TestModel(id: 1, title: title, url: TestData.randomURL).write(to: db)
+        let back = try await TestModel.read(from: db, id: 1)
+        XCTAssertEqual(back?.title, title)
+        await db.close()
+    }
+
+    // MARK: Codable blob columns
+
+    // A Codable type stored as a BLOB must round-trip through its own unifiedRepresentation()
+    // and from(unifiedRepresentation:), whether or not that representation happens to be JSON.
+    func testStorableAsDataRoundTripsBothRepresentations() async throws {
+        let db = try Blackbird.Database(path: sqliteFilename)
+
+        let prefs = RegressionPrefs(theme: "dark", fontSize: 14)
+        let ref = UUID()
+        try await RegressionBlobModel(id: 1, prefs: prefs, ref: ref).write(to: db)
+
+        let back = try await RegressionBlobModel.read(from: db, id: 1)
+        XCTAssertEqual(back?.prefs, prefs, "JSON-backed blob column did not round-trip")
+        XCTAssertEqual(back?.ref, ref, "raw-bytes blob column (UUID) did not round-trip")
+        await db.close()
+    }
+}
+
+// A JSON-backed Codable blob column, the documented use of BlackbirdStorableAsData.
+struct RegressionPrefs: Codable, Equatable, BlackbirdStorableAsData, BlackbirdColumnWrappable {
+    var theme: String
+    var fontSize: Int
+
+    func unifiedRepresentation() -> Data { (try? JSONEncoder().encode(self)) ?? Data() }
+    static func from(unifiedRepresentation: Data) -> Self {
+        (try? JSONDecoder().decode(Self.self, from: unifiedRepresentation)) ?? Self(theme: "light", fontSize: 12)
+    }
+    static func fromValue(_ value: Blackbird.Value) -> Self? {
+        value.dataValue.map { from(unifiedRepresentation: $0) }
+    }
+}
+
+// Optional columns: a non-optional blob column can't decode the empty-blob column default.
+struct RegressionBlobModel: BlackbirdModel {
+    @BlackbirdColumn var id: Int
+    @BlackbirdColumn var prefs: RegressionPrefs?
+    @BlackbirdColumn var ref: UUID?
 }
