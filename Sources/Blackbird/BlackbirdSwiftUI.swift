@@ -37,27 +37,83 @@ import SwiftUI
 extension Blackbird.Database {
     /// Stand-in for a `\.blackbirdDatabase` environment value that was never injected.
     ///
-    /// Created lazily, so it only ever exists if something actually read the environment value
-    /// without a database having been set — which makes its creation the signal that something is
-    /// misconfigured, and the one place worth warning from.
-    ///
-    /// Being a `static let` also matters: the `@Entry` default expression is evaluated on *every*
-    /// read of an uninjected value, so an inline `try! .inMemoryDatabase()` handed out a brand-new
+    /// Being a `static let` matters: the `@Entry` default expression is evaluated on *every* read
+    /// of an uninjected value, so an inline `try! .inMemoryDatabase()` handed out a brand-new
     /// database each time. A view that wrote and then read wouldn't see its own write, and each
     /// access leaked a connection.
-    public static let unconfigured: Blackbird.Database = {
-        print("[Blackbird] ⚠️ No database was injected into the SwiftUI environment; falling back "
-            + "to a throwaway in-memory database. Nothing written to it will persist. Set "
-            + ".environment(\\.blackbirdDatabase, …) on your root view.")
-        return try! .inMemoryDatabase()
-    }()
+    ///
+    /// Merely existing is *not* a sign of misconfiguration, which is why nothing is logged here:
+    /// see ``scheduleUnconfiguredWarningIfNeeded(boundTo:currentDatabase:)``.
+    public static let unconfigured: Blackbird.Database = { try! .inMemoryDatabase() }()
+
+    internal struct UnconfiguredWarningState: Sendable {
+        var hasWarned = false
+        var checkScheduled = false
+
+        /// How long to wait before deciding that a live query bound to ``unconfigured`` is really
+        /// misconfigured rather than mid-update. Generous on purpose — this only ever delays a
+        /// diagnostic message. Tests shorten it.
+        ///
+        /// Nanoseconds rather than `Duration` because this package still deploys to macOS 12.
+        var delayNanoseconds: UInt64 = 1_000_000_000
+
+        /// Seam for tests to observe the warning instead of having it land on the console.
+        var emit: @Sendable (String) -> Void = { print($0) }
+    }
+    internal static let unconfiguredWarning = Blackbird.Locked(UnconfiguredWarningState())
+
+    /// Warns once per process when a live query is *still* pointed at ``unconfigured`` a moment
+    /// after binding to it.
+    ///
+    /// The check is deferred rather than made at bind time because SwiftUI can evaluate a view —
+    /// and so run a `@BlackbirdLive…` wrapper's `update()` — before an ancestor's
+    /// `.environment(\.blackbirdDatabase, …)` has been applied. That transient read resolves to
+    /// ``unconfigured`` in an app that is configured perfectly well, and the binding corrects
+    /// itself on the next update. Re-checking after things settle is what separates that harmless
+    /// case from an injection that never happens at all.
+    ///
+    /// - Parameters:
+    ///   - database: The database just bound. Nothing happens unless it is ``unconfigured``.
+    ///   - currentDatabase: Re-reads whatever the caller is bound to *now*, evaluated after the
+    ///     delay. Returning anything other than ``unconfigured`` cancels the warning.
+    internal static func scheduleUnconfiguredWarningIfNeeded(
+        boundTo database: Blackbird.Database?,
+        currentDatabase: @escaping @Sendable () -> Blackbird.Database?
+    ) {
+        guard database === unconfigured else { return }
+
+        let delay = unconfiguredWarning.withLock { state -> UInt64? in
+            guard !state.hasWarned, !state.checkScheduled else { return nil }
+            state.checkScheduled = true
+            return state.delayNanoseconds
+        }
+        guard let delay else { return }
+
+        Task.detached {
+            try? await Task.sleep(nanoseconds: delay)
+
+            let stillUnconfigured = currentDatabase() === unconfigured
+            let emit = unconfiguredWarning.withLock { state -> (@Sendable (String) -> Void)? in
+                state.checkScheduled = false
+                guard stillUnconfigured, !state.hasWarned else { return nil }
+                state.hasWarned = true
+                return state.emit
+            }
+            guard let emit else { return }
+
+            emit("[Blackbird] ⚠️ A live query is reading from a throwaway in-memory database: no "
+                + "database was injected into the SwiftUI environment. Nothing written to it will "
+                + "persist. Set .environment(\\.blackbirdDatabase, …) on your root view.")
+        }
+    }
 }
 
 extension EnvironmentValues {
     /// The ``Blackbird/Database`` to use with `@BlackbirdLive…` property wrappers.
     ///
     /// Non-optional for ergonomics. Inject it on your root view; if you don't, reads fall back to
-    /// ``Blackbird/Database/unconfigured``, which warns once on the console.
+    /// ``Blackbird/Database/unconfigured``, and any live query left reading from it warns once on
+    /// the console.
     @Entry public var blackbirdDatabase: Blackbird.Database = .unconfigured
 }
 
@@ -490,7 +546,11 @@ extension Blackbird {
                     state.changeObserver = nil
                 }
             }
-            
+
+            Blackbird.Database.scheduleUnconfiguredWarningIfNeeded(boundTo: database) { [weak self] in
+                self?.state.withLock { $0.database }
+            }
+
             update()
         }
         

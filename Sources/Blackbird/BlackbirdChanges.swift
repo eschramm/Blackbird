@@ -354,6 +354,9 @@ extension Blackbird {
                 $0.generator = generator
             }
             self.changeDatabase(database)
+            Blackbird.Database.scheduleUnconfiguredWarningIfNeeded(boundTo: database) { [weak self] in
+                self?.config.withLock { $0.database }
+            }
             enqueueUpdate()
         }
         
