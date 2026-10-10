@@ -32,7 +32,9 @@
 //
 
 import Foundation
+#if canImport(Combine)
 @preconcurrency import Combine
+#endif
 
 public extension Blackbird {
     /// A change to a table in a Blackbird database, as published by a ``ChangePublisher``.
@@ -72,10 +74,12 @@ public extension Blackbird {
         }
     }
 
+    #if canImport(Combine)
     /// A Publisher that emits when data in a Blackbird table has changed.
     ///
     /// The ``Blackbird/Change`` passed indicates which rows and columns in the table have changed.
     typealias ChangePublisher = AnyPublisher<Change, Never>
+    #endif
 
     /// A change to a table in a Blackbird database, as published by a ``ChangePublisher``.
     struct ModelChange<T: BlackbirdModel>: Sendable {
@@ -132,10 +136,12 @@ public extension Blackbird {
         }
     }
 
+    #if canImport(Combine)
     /// A Publisher that emits when data in a BlackbirdModel table has changed.
     ///
     /// The ``Blackbird/ModelChange`` passed indicates which rows and columns in the table have changed.
     typealias ModelChangePublisher<T: BlackbirdModel> = AnyPublisher<ModelChange<T>, Never>
+    #endif
 
     internal static func isRelevantPrimaryKeyChange(watchedPrimaryKeys: Blackbird.PrimaryKeyValues?, changedPrimaryKeys: Blackbird.PrimaryKeyValues?) -> Bool {
         guard let watchedPrimaryKeys else {
@@ -161,6 +167,7 @@ public extension Blackbird {
 
 extension Blackbird.Database {
 
+    #if canImport(Combine)
     /// The ``Blackbird/ChangePublisher`` for the specified table.
     /// - Parameter tableName: The table name.
     /// - Returns: A ``Blackbird/ChangePublisher`` that publishes ``Blackbird/Change`` objects for each change in the specified table.
@@ -170,6 +177,7 @@ extension Blackbird.Database {
     /// > - The publisher may send from any thread.
     /// > - Changes may be over-reported.
     public func changePublisher(for tableName: String) -> Blackbird.ChangePublisher { changeReporter.changePublisher(for: tableName) }
+    #endif
 
     internal final class ChangeReporter: @unchecked Sendable /* unchecked due to use of internal locking */ {
         internal final class AccumulatedChanges {
@@ -190,7 +198,9 @@ extension Blackbird.Database {
         private var bufferedRowIDsForIgnoredTable = Set<Int64>()
         
         private var accumulatedChangesByTable: [String: AccumulatedChanges] = [:]
+        #if canImport(Combine)
         private var tableChangePublishers: [String: PassthroughSubject<Blackbird.Change, Never>] = [:]
+        #endif
         
         private var debugPrintEveryReportedChange = false
         
@@ -203,6 +213,7 @@ extension Blackbird.Database {
             self.cache = cache
         }
 
+        #if canImport(Combine)
         internal func changePublisher(for tableName: String) -> Blackbird.ChangePublisher {
             lock.withLock {
                 if let existing = tableChangePublishers[tableName] { return existing.eraseToAnyPublisher() }
@@ -211,6 +222,7 @@ extension Blackbird.Database {
                 return publisher.receive(on: DispatchQueue.main).eraseToAnyPublisher()
             }
         }
+        #endif
 
         internal func ignoreWritesToTable(_ name: String, beginBufferingRowIDs: Bool = false) {
             lock.lock()
@@ -251,7 +263,9 @@ extension Blackbird.Database {
             cache.invalidate()
 
             lock.lock()
+            #if canImport(Combine)
             for tableName in tableChangePublishers.keys { accumulatedChangesByTable[tableName] = AccumulatedChanges.entireTableChange() }
+            #endif
             let needsFlush = activeTransactions.isEmpty
             lock.unlock()
             if needsFlush { flush() }
@@ -291,11 +305,14 @@ extension Blackbird.Database {
         
         private func flush() {
             lock.lock()
+            #if canImport(Combine)
             let publishers = tableChangePublishers
+            #endif
             let changesByTable = accumulatedChangesByTable
             accumulatedChangesByTable.removeAll()
             lock.unlock()
             
+            #if canImport(Combine)
             DispatchQueue.main.async {
                 for (tableName, accumulatedChanges) in changesByTable {
                     if let keys = accumulatedChanges.primaryKeys {
@@ -309,6 +326,14 @@ extension Blackbird.Database {
                     }
                 }
             }
+            #else
+            // Without Combine there are no publishers to notify.
+            guard debugPrintEveryReportedChange else { return }
+            for (tableName, accumulatedChanges) in changesByTable {
+                let keys = accumulatedChanges.primaryKeys.map { "\($0.count) keys" } ?? "unknown keys"
+                print("[Blackbird.ChangeReporter] changed \(tableName) (\(keys), fields: \(accumulatedChanges.columnNames?.joined(separator: ",") ?? "(all/unknown)"))")
+            }
+            #endif
         }
     }
 }
@@ -331,6 +356,7 @@ extension Blackbird {
     /// ```
     public typealias CachedResultGenerator<T: Sendable> = (@Sendable (_ db: Blackbird.Database) async throws -> T)
 
+    #if canImport(Combine)
     internal final class CachedResultPublisher<T: Sendable>: Sendable {
         public let valuePublisher: CurrentValueSubject<T?, Never>
 
@@ -399,4 +425,5 @@ extension Blackbird {
             }
         }
     }
+    #endif
 }

@@ -31,6 +31,7 @@
 //  SOFTWARE.
 //
 
+#if canImport(SwiftUI)
 import SwiftUI
 @preconcurrency import Combine
 
@@ -721,4 +722,4 @@ internal final class BlackbirdColumnObserverInternal<T: BlackbirdModel, V: Black
         setResult(newValue)
     }
 }
-
+#endif

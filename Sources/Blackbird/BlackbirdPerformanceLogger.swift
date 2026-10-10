@@ -32,6 +32,7 @@
 //
 
 import Foundation
+#if canImport(OSLog)
 import OSLog
 
 /// A logger that emits signposts and log events to the system logging stream.
@@ -143,3 +144,26 @@ extension Blackbird {
         }
     }
 }
+#else
+extension Blackbird {
+    static let loggingSubsystem = "org.marco.blackbird"
+
+    /// No-op stand-in for platforms without OSLog signposts.
+    internal struct PerformanceLogger: Sendable {
+        enum Signpost: CaseIterable {
+            case openDatabase
+            case closeDatabase
+            case execute
+            case rowsByPreparedFunc
+            case cancellableTransaction
+        }
+
+        struct IntervalState: Sendable {}
+
+        init(subsystem: String, category: String) {}
+
+        func begin(signpost: Signpost, message: @autoclosure () -> String = "", name: StaticString = #function) -> IntervalState { IntervalState() }
+        func end(state: IntervalState, name: StaticString = #function) {}
+    }
+}
+#endif

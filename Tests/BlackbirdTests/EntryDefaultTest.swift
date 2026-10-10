@@ -1,3 +1,4 @@
+#if canImport(SwiftUI)
 import XCTest
 import SwiftUI
 @testable import Blackbird
@@ -101,3 +102,4 @@ final class EntryDefaultTest: XCTestCase, @unchecked Sendable {
         }
     }
 }
+#endif

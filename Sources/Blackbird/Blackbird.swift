@@ -32,7 +32,11 @@
 //
 
 import Foundation
+#if canImport(SQLite3)
 import SQLite3
+#else
+import CSQLite
+#endif
 
 /// A small, fast, lightweight SQLite database wrapper and model layer.
 public class Blackbird {
@@ -269,17 +273,24 @@ extension BlackbirdLock {
     }
 }
 
+#if canImport(os)
 import os
+#endif
 extension Blackbird {
     /// Blackbird's lock primitive, offered for public use.
     public static func Lock() -> BlackbirdLock {
+        #if canImport(os)
         if #available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *) {
             return UnfairLock()
         } else {
             return LegacyUnfairLock()
         }
+        #else
+        return FoundationLock()
+        #endif
     }
 
+    #if canImport(os)
     @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
     fileprivate final class UnfairLock: BlackbirdLock {
         private let _lock = OSAllocatedUnfairLock()
@@ -298,6 +309,13 @@ extension Blackbird {
         }
         deinit { _lock.deallocate() }
     }
+    #else
+    fileprivate final class FoundationLock: BlackbirdLock {
+        private let _lock = NSLock()
+        internal func lock() { _lock.lock() }
+        internal func unlock() { _lock.unlock() }
+    }
+    #endif
 
     /// Blackbird's locked-value utility, offered for public use. Useful when conforming to `Sendable`.
     public final class Locked<T: Sendable>: @unchecked Sendable /* unchecked due to use of internal locking */ {
@@ -324,7 +342,9 @@ extension Blackbird {
     }
 
     internal final class FileChangeMonitor: @unchecked Sendable /* unchecked due to use of internal locking */ {
+        #if canImport(Darwin)
         private var sources: [DispatchSourceFileSystemObject] = []
+        #endif
 
         private var changeHandler: (() -> Void)?
         private var isClosed = false
@@ -333,6 +353,7 @@ extension Blackbird {
         private let lock = Lock()
 
         public func addFile(filePath: String) {
+            #if canImport(Darwin)
             let fsPath = (filePath as NSString).fileSystemRepresentation
             let fd = open(fsPath, O_EVTONLY)
             guard fd >= 0 else { return }
@@ -352,6 +373,10 @@ extension Blackbird {
             self.lock.lock()
             self.sources.append(source)
             self.lock.unlock()
+            #else
+            // Dispatch has no file-system event source off Darwin, so writes to the database
+            // file from outside this process go undetected there.
+            #endif
         }
         
         deinit {
@@ -367,7 +392,9 @@ extension Blackbird {
         public func cancel() {
             self.lock.lock()
             self.isClosed = true
+            #if canImport(Darwin)
             for source in sources { source.cancel() }
+            #endif
             self.lock.unlock()
             
         }

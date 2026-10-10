@@ -18,9 +18,16 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        // Apple platforms ship a `SQLite3` module; elsewhere, link the system's libsqlite3.
+        .systemLibrary(
+            name: "CSQLite",
+            providers: [.apt(["libsqlite3-dev"])]
+        ),
         .target(
             name: "Blackbird",
-            dependencies: []
+            dependencies: [
+                .target(name: "CSQLite", condition: .when(platforms: [.linux]))
+            ]
         ),
         .testTarget(
             name: "BlackbirdTests",

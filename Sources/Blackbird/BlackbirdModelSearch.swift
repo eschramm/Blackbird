@@ -32,7 +32,11 @@
 //
 
 import Foundation
+#if canImport(SQLite3)
 import SQLite3
+#else
+import CSQLite
+#endif
 
 /// Defines a searchable field for a full-text index in a ``BlackbirdModel/fullTextSearchableColumns`` dictionary.
 public struct BlackbirdModelFullTextSearchableColumn: Equatable, Hashable, Sendable {

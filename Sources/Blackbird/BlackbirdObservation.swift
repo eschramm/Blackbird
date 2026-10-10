@@ -31,6 +31,7 @@
 //  SOFTWARE.
 //
 
+#if canImport(Observation) && canImport(Combine)
 import Observation
 import Combine
 
@@ -203,4 +204,4 @@ public final class BlackbirdModelObserver<T: BlackbirdModel> {
         }
     }
 }
-
+#endif

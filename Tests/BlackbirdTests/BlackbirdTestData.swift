@@ -44,18 +44,21 @@ struct TestData {
     }
 
     static func randomString(length: Int) -> String {
-        var data = Data(count: length)
-        let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!) }
-        if result != errSecSuccess { fatalError("SecRandomCopyBytes failed") }
+        let data = randomData(length: length)
         let b64 = data.base64EncodedString()
         return String(b64.prefix(upTo: b64.index(b64.startIndex, offsetBy: length)))
     }
     
     static func randomData(length: Int) -> Data {
+        #if canImport(Security)
         var data = Data(count: length)
         let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!) }
         if result != errSecSuccess { fatalError("SecRandomCopyBytes failed") }
         return data
+        #else
+        var generator = SystemRandomNumberGenerator()
+        return Data((0..<length).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+        #endif
     }
 }
 

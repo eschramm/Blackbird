@@ -32,7 +32,9 @@
 //
 
 import XCTest
+#if canImport(Combine)
 import Combine
+#endif
 @testable import Blackbird
 
 func AssertNoThrowAsync(_ action: @autoclosure (() async throws -> Void)) async {

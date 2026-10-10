@@ -83,11 +83,11 @@ extension Blackbird.Database {
             
             init(_ value: T) {
                 _value = value
-                lastAccessed = mach_absolute_time()
+                lastAccessed = Blackbird.Database.Cache.accessTime()
             }
             
             public func value() -> T {
-                lastAccessed = mach_absolute_time()
+                lastAccessed = Blackbird.Database.Cache.accessTime()
                 return _value
             }
             
@@ -101,6 +101,15 @@ extension Blackbird.Database {
             case hit(value: Sendable?)
         }
 
+        fileprivate static func accessTime() -> UInt64 {
+            #if canImport(Darwin)
+            return mach_absolute_time()
+            #else
+            return DispatchTime.now().uptimeNanoseconds
+            #endif
+        }
+
+        #if canImport(Darwin)
         private let lowMemoryEventSource: DispatchSourceMemoryPressure
         public init() {
             lowMemoryEventSource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical])
@@ -120,6 +129,10 @@ extension Blackbird.Database {
         deinit {
             lowMemoryEventSource.cancel()
         }
+        #else
+        // Dispatch has no memory-pressure source off Darwin.
+        public init() {}
+        #endif
     
         private final class TableCache: @unchecked Sendable { /* unchecked due to internal locking */
             private let lock = Blackbird.Lock()
@@ -150,7 +163,7 @@ extension Blackbird.Database {
                 defer { lock.unlock() }
 
                 if let hit = modelsByPrimaryKey[primaryKey] {
-                    hit.lastAccessed = mach_absolute_time()
+                    hit.lastAccessed = Blackbird.Database.Cache.accessTime()
                     hits += 1
                     hitsCostSavings += MemoryLayout<any BlackbirdModel>.size
                     return hit.value()

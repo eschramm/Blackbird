@@ -32,7 +32,9 @@
 //
 
 import Foundation
+#if canImport(Combine)
 import Combine
+#endif
 
 /// A model protocol based on `Codable` and SQLite.
 ///
@@ -246,11 +248,13 @@ public protocol BlackbirdModel: Codable, Equatable, Identifiable, Hashable, Send
     /// > Note: The cache is not limited in byte size — only entry count. Use caution with memory usage if enabled for large tables.
     static var cacheLimit: Int { get }
 
+    #if canImport(SwiftUI)
     /// Shorthand for this type's `ModelArrayUpdater` interface for SwiftUI.
     typealias ArrayUpdater = Blackbird.ModelArrayUpdater<Self>
     
     /// Shorthand for this type's `ModelInstanceUpdater` interface for SwiftUI.
     typealias InstanceUpdater = Blackbird.ModelInstanceUpdater<Self>
+    #endif
 
     /// How row-level migration failures should be handled. The default is ``BlackbirdModelMigrationErrorAction/throwError``.
     ///
@@ -288,7 +292,9 @@ internal extension BlackbirdModel {
 }
 
 extension BlackbirdModel {
+    #if canImport(Combine)
     public typealias ChangePublisher = Blackbird.ModelChangePublisher<Self>
+    #endif
 
     public static var tableName: String { String(describing: Self.self) }
     public static var primaryKey: [BlackbirdColumnKeyPath] { [] }
@@ -359,6 +365,7 @@ extension BlackbirdModel {
     /// Creates a new instance of the called model type with all values set to their SQLite defaults: nil for optionals, 0 for numeric types, empty string for string values, and empty data for data values.
     public static func instanceFromDefaults() -> Self { SchemaGenerator.instanceFromDefaults(Self.self) }
 
+    #if canImport(Combine)
     /// The change publisher for this model's table.
     /// - Parameter database: The ``Blackbird/Database`` instance to monitor.
     /// - Returns: The ``Blackbird/ModelChangePublisher`` for this model's table.
@@ -492,6 +499,7 @@ extension BlackbirdModel {
         }
         .eraseToAnyPublisher()
     }
+    #endif
 
 
     /// Reads a single instance with the given primary-key value from a database if the primary key is a single column named `id`.
