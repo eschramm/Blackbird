@@ -325,6 +325,38 @@ extension Blackbird {
             /// }
             /// ```
             public static let requireModelSchemaValidationBeforeUse = Options(rawValue: 1 << 7)
+
+            /// Take the database's write lock at the start of every transaction, instead of when the transaction first writes.
+            ///
+            /// Use this when another connection may write to the same file while this one is in use: another process, or a
+            /// tool such as a backup or replication agent that briefly locks the database.
+            ///
+            /// Without this option a transaction starts without any lock, takes a read lock at its first query, and tries to upgrade
+            /// to the write lock at its first write. If another connection holds the write lock at that moment, SQLite fails the
+            /// write immediately with `SQLITE_BUSY`, **even when a busy timeout is set**: it will not make a connection that already
+            /// holds a read lock wait, because that can deadlock. Every ``BlackbirdModel`` write that reads before it writes inside
+            /// a transaction is exposed to this. The same instant failure happens if another connection merely committed a
+            /// write between this transaction's read and its write (`SQLITE_BUSY_SNAPSHOT`).
+            ///
+            /// With this option, the outermost transaction begins with `BEGIN IMMEDIATE`, which takes the write lock before anything
+            /// is read. That is a point where SQLite does honor the busy timeout, so the transaction waits for the other connection
+            /// instead of failing.
+            ///
+            /// Set a busy timeout as well (`PRAGMA busy_timeout = 5000`); SQLite's default is not to wait at all, and without one
+            /// this option only moves the failure to the start of the transaction.
+            ///
+            /// The costs, all of which concern other connections to the same file (within a single ``Blackbird/Database`` nothing
+            /// changes, since it has one connection):
+            ///
+            /// - A transaction that only reads also takes the write lock, so it excludes other writers while it runs, and it
+            ///   can now wait, or fail with `SQLITE_BUSY` once the busy timeout runs out, where a plain reader never would.
+            /// - The write lock is held for the whole transaction, including across any `await` inside an async transaction's
+            ///   action. Keep such transactions short, or another program may give up waiting for the lock.
+            /// - While waiting for the lock, the database's actor is blocked for up to the busy timeout, and every other
+            ///   query on this database waits behind it.
+            ///
+            /// Ignored for ``readOnly`` databases. Can also be changed after opening with ``Blackbird/Database/setImmediateTransactions(_:)``.
+            public static let immediateTransactions = Options(rawValue: 1 << 8)
         }
         
         /// Returns all filenames expected to be used by a database if created at the given file path.
@@ -547,6 +579,10 @@ extension Blackbird {
 
         public func setArtificialQueryDelay(_ delay: TimeInterval?) async { await core.setArtificialQueryDelay(delay) }
 
+        /// Turns ``Options/immediateTransactions`` on or off for a database that is already open, such as one opened by other code.
+        /// Takes effect with the next outermost transaction. Has no effect on a ``Options/readOnly`` database.
+        public func setImmediateTransactions(_ enabled: Bool) async { await core.setImmediateTransactions(enabled) }
+
         /// Creates a backup of the whole database.
         ///
         /// - Parameters:
@@ -571,6 +607,8 @@ extension Blackbird {
         
             private var debugPrintEveryQuery = false
             private var debugPrintQueryParameterValues = false
+            private let isReadOnly: Bool
+            private var immediateTransactions = false
 
             internal let dbHandle: SQLiteHandle
 
@@ -600,6 +638,8 @@ extension Blackbird {
                 self.cache = cache
                 self.debugPrintEveryQuery = options.contains(.debugPrintEveryQuery)
                 self.debugPrintQueryParameterValues = options.contains(.debugPrintQueryParameterValues)
+                self.isReadOnly = options.contains(.readOnly)
+                self.immediateTransactions = options.contains(.immediateTransactions) && !options.contains(.readOnly)
                 
                 if options.contains(.monitorForExternalChanges), SQLITE_OK == sqlite3_prepare_v3(dbHandle.pointer, "PRAGMA data_version", -1, UInt32(SQLITE_PREPARE_PERSISTENT), &dataVersionStmt, nil) {
                     if SQLITE_ROW == sqlite3_step(dataVersionStmt) { previousDataVersion = sqlite3_column_int64(dataVersionStmt, 0) }
@@ -624,6 +664,10 @@ extension Blackbird {
                 isClosed = true
             }
             
+            public func setImmediateTransactions(_ enabled: Bool) {
+                immediateTransactions = enabled && !isReadOnly
+            }
+
             private var artificialQueryDelay: TimeInterval? = nil
             public func setArtificialQueryDelay(_ delay: TimeInterval?) {
                 artificialQueryDelay = delay
@@ -701,13 +745,57 @@ extension Blackbird {
             //
             // RELEASE runs only if ROLLBACK TO succeeded: releasing a savepoint whose rollback
             // failed would commit the very work that was supposed to be undone.
-            private func rollbackToSavepoint(_ transactionID: Int64) {
+            //
+            // endingImmediate: this savepoint was opened inside a BEGIN IMMEDIATE that
+            // beginSavepoint() issued for it, which must be ended as well. That is attempted
+            // whether or not the savepoint could be rolled back (for instance when COMMIT itself
+            // failed, after the savepoint had already been released), but only if the connection
+            // is still inside a transaction: SQLite may have ended it already, as above.
+            private func rollbackToSavepoint(_ transactionID: Int64, endingImmediate: Bool) {
                 do {
                     try execute("ROLLBACK TO SAVEPOINT \"\(transactionID)\"")
                     try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
                 } catch {
                     if debugPrintEveryQuery { print("[Blackbird.Database] rollback to savepoint \(transactionID) failed (transaction was likely already rolled back by SQLite): \(error)") }
                 }
+                // isClosed first: an async transaction's action can suspend, and close() can run
+                // on the actor meanwhile. The handle must not be touched after that.
+                if endingImmediate, !isClosed, sqlite3_get_autocommit(dbHandle.pointer) == 0 {
+                    do {
+                        try execute("ROLLBACK")
+                    } catch {
+                        if debugPrintEveryQuery { print("[Blackbird.Database] rollback of immediate transaction \(transactionID) failed: \(error)") }
+                    }
+                }
+            }
+
+            // Opens the savepoint for a transaction.
+            //
+            // With Options.immediateTransactions, the outermost one is wrapped in BEGIN IMMEDIATE
+            // so the write lock is taken before anything is read (see the option for why). "Outermost"
+            // is judged by SQLite itself, not by transactionDepth: autocommit is off whenever any
+            // transaction is open on the connection, including one the caller began by hand.
+            //
+            // Returns whether it issued BEGIN IMMEDIATE. The caller must pass that to
+            // commitSavepoint() or rollbackToSavepoint(), which end it.
+            private func beginSavepoint(_ transactionID: Int64) throws -> Bool {
+                var beganImmediate = false
+                if immediateTransactions, sqlite3_get_autocommit(dbHandle.pointer) != 0 {
+                    try execute("BEGIN IMMEDIATE")
+                    beganImmediate = true
+                }
+                do {
+                    try execute("SAVEPOINT \"\(transactionID)\"")
+                } catch {
+                    if beganImmediate { try? execute("ROLLBACK") }
+                    throw error
+                }
+                return beganImmediate
+            }
+
+            private func commitSavepoint(_ transactionID: Int64, endingImmediate: Bool) throws {
+                try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
+                if endingImmediate { try execute("COMMIT") }
             }
 
             // Exactly like the function below, but accepts an async action
@@ -737,18 +825,18 @@ extension Blackbird {
                     transactionDepth -= 1
                 }
 
-                try execute("SAVEPOINT \"\(transactionID)\"")
+                let beganImmediate = try beginSavepoint(transactionID)
                 do {
                     let result: R = try await action(self)
-                    try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
+                    try commitSavepoint(transactionID, endingImmediate: beganImmediate)
                     committed = true
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
-                    rollbackToSavepoint(transactionID)
+                    rollbackToSavepoint(transactionID, endingImmediate: beganImmediate)
                     cache?.invalidate()
                     return .rolledBack
                 } catch {
-                    rollbackToSavepoint(transactionID)
+                    rollbackToSavepoint(transactionID, endingImmediate: beganImmediate)
                     cache?.invalidate()
                     throw error
                 }
@@ -778,18 +866,18 @@ extension Blackbird {
                     transactionDepth -= 1
                 }
 
-                try execute("SAVEPOINT \"\(transactionID)\"")
+                let beganImmediate = try beginSavepoint(transactionID)
                 do {
                     let result: R = try action(self)
-                    try execute("RELEASE SAVEPOINT \"\(transactionID)\"")
+                    try commitSavepoint(transactionID, endingImmediate: beganImmediate)
                     committed = true
                     return .committed(result)
                 } catch Blackbird.Error.cancelTransaction {
-                    rollbackToSavepoint(transactionID)
+                    rollbackToSavepoint(transactionID, endingImmediate: beganImmediate)
                     cache?.invalidate()
                     return .rolledBack
                 } catch {
-                    rollbackToSavepoint(transactionID)
+                    rollbackToSavepoint(transactionID, endingImmediate: beganImmediate)
                     cache?.invalidate()
                     throw error
                 }
