@@ -36,7 +36,11 @@ struct DecodeBenchTests {
 
     static func cpuSeconds() -> Double {
         var usage = rusage()
+        #if os(Linux)
+        getrusage(__rusage_who_t(RUSAGE_SELF.rawValue), &usage)   // Glibc's RUSAGE_SELF is an enum
+        #else
         getrusage(RUSAGE_SELF, &usage)
+        #endif
         return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
     }
 
