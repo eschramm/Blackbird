@@ -275,14 +275,14 @@ extension Blackbird {
         internal func keyPathToColumnInfo(keyPath: AnyKeyPath) -> Blackbird.ColumnInfo {
             guard let emptyInstance else { fatalError("Cannot call keyPathToColumnName on a Blackbird.Table initialized directly from a database") }
             guard let column = emptyInstance[keyPath: keyPath] as? any ColumnWrapper else { fatalError("Key path is not a @BlackbirdColumn on \(name)") }
-            guard let name = column.internalNameInSchemaGenerator.value else { fatalError("Failed to look up key-path name on \(name)") }
+            guard let name = column.internalNameInSchemaGenerator else { fatalError("Failed to look up key-path name on \(name)") }
             return Blackbird.ColumnInfo(name: name, type: column.valueType.self)
         }
 
         internal func keyPathToColumnName(keyPath: AnyKeyPath) -> String {
             guard let emptyInstance else { fatalError("Cannot call keyPathToColumnName on a Blackbird.Table initialized directly from a database") }
             guard let column = emptyInstance[keyPath: keyPath] as? any ColumnWrapper else { fatalError("Key path is not a @BlackbirdColumn on \(name). Make sure to use the $-prefixed wrapper, e.g. \\.$id.") }
-            guard let name = column.internalNameInSchemaGenerator.value else { fatalError("Failed to look up key-path name on \(name)") }
+            guard let name = column.internalNameInSchemaGenerator else { fatalError("Failed to look up key-path name on \(name)") }
             return name
         }
 
@@ -497,7 +497,7 @@ internal final class SchemaGenerator: Sendable {
 
             if let column = child.value as? any ColumnWrapper {
                 label = label.removingLeadingUnderscore()
-                column.internalNameInSchemaGenerator.value = label
+                column.internalNameInSchemaGenerator = label
                 if label == "id" { hasColumNamedID = true }
 
                 var isOptional = false
@@ -531,7 +531,7 @@ internal final class SchemaGenerator: Sendable {
                 fatalError("\(String(describing: T.self)): \(messageLabel) includes a key path that is not a @BlackbirdColumn. (Use the \"$\" wrapper for a column.)")
             }
             
-            guard let name = column.internalNameInSchemaGenerator.value else { fatalError("\(String(describing: T.self)): Failed to look up \(messageLabel) key-path name") }
+            guard let name = column.internalNameInSchemaGenerator else { fatalError("\(String(describing: T.self)): Failed to look up \(messageLabel) key-path name") }
             return name
         }
                 

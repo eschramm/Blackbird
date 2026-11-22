@@ -39,7 +39,34 @@ internal protocol ColumnWrapper: WrappedType {
     var valueType: any BlackbirdColumnWrappable.Type { get }
     func hasChanged(in database: Blackbird.Database) -> Bool
     func clearHasChanged(in database: Blackbird.Database)
-    var internalNameInSchemaGenerator: Blackbird.Locked<String?> { get }
+    /// The column's name, set only on the schema generator's own instance of a model.
+    var internalNameInSchemaGenerator: String? { get nonmutating set }
+}
+
+/// A column's change tracking, shared by every copy of one model instance (under its `Locked`).
+///
+/// Not generic, and not nested in the generic `BlackbirdColumn<T>` (which would make it generic
+/// over `T` too): a generic class's type metadata for an unspecialized `T` is looked up in the
+/// Swift runtime's shared metadata cache each time one is made, and decoding makes one for every
+/// column of every row; threads decoding at once contended on that cache.
+internal final class BlackbirdColumnState: @unchecked Sendable /* unchecked due to external locking in all uses */ {
+    var hasChanged: Bool
+    /// The value as last saved or read, a `T`, compared by `BlackbirdColumn<T>.hasChanged(in:)`.
+    var lastSavedValue: Any?
+    /// The database's ID, not a weak reference to it: forming and dropping a weak reference to
+    /// the one shared `Database` for every column of every row is an atomic count that threads
+    /// decoding at once contend on. IDs aren't reused, so a closed database's never matches a
+    /// new one, as a weak reference gone nil didn't.
+    var lastUsedDatabaseID: Blackbird.Database.InstanceID?
+    /// Set only on the schema generator's own instance of a model. Kept here rather than in a
+    /// lock of its own, which every decoded column paid for.
+    var nameInSchemaGenerator: String?
+
+    init(hasChanged: Bool, lastSavedValue: Any? = nil, lastUsedDatabaseID: Blackbird.Database.InstanceID? = nil) {
+        self.hasChanged = hasChanged
+        self.lastSavedValue = lastSavedValue
+        self.lastUsedDatabaseID = lastUsedDatabaseID
+    }
 }
 
 /// Property wrapper for column variables in ``BlackbirdModel`` `struct` definitions.
@@ -49,20 +76,11 @@ internal protocol ColumnWrapper: WrappedType {
     public static func == (lhs: Self, rhs: Self) -> Bool { type(of: lhs) == type(of: rhs) && lhs.value == rhs.value }
     
     private var _value: T
-    internal final class ColumnState<U>: @unchecked Sendable /* unchecked due to external locking in all uses */ {
-        var hasChanged: Bool
-        var lastSavedValue: U?
-        weak var lastUsedDatabase: Blackbird.Database?
-
-        init(hasChanged: Bool, lastSavedValue: U? = nil, lastUsedDatabase: Blackbird.Database? = nil) {
-            self.hasChanged = hasChanged
-            self.lastSavedValue = lastSavedValue
-            self.lastUsedDatabase = lastUsedDatabase
-        }
+    private let state: Blackbird.Locked<BlackbirdColumnState>
+    var internalNameInSchemaGenerator: String? {
+        get { state.withLock { $0.nameInSchemaGenerator } }
+        nonmutating set { state.withLock { $0.nameInSchemaGenerator = newValue } }
     }
-    
-    private let state: Blackbird.Locked<ColumnState<T>>
-    let internalNameInSchemaGenerator = Blackbird.Locked<String?>(nil)
 
     public var value: T {
         get { state.withLock { _ in self._value } }
@@ -86,17 +104,18 @@ internal protocol ColumnWrapper: WrappedType {
     /// Whether this value has changed since last being saved or read. This errs on the side of over-reporting changes, and may return `true` if the value has not actually changed.
     public func hasChanged(in database: Blackbird.Database) -> Bool {
         state.withLock { state in
-            if state.lastUsedDatabase != database { return true }
+            if state.lastUsedDatabaseID != database.id { return true }
             if state.hasChanged { return true }
             // The state above is shared by every copy of an instance, so a sibling copy's
             // save clearing it must not hide this copy's own different, unsaved value.
-            return state.lastSavedValue != self._value
+            guard let saved = state.lastSavedValue as? T else { return true }
+            return saved != self._value
         }
     }
 
     internal func clearHasChanged(in database: Blackbird.Database) {
         state.withLock { state in
-            state.lastUsedDatabase = database
+            state.lastUsedDatabaseID = database.id
             state.hasChanged = false
             state.lastSavedValue = self._value
         }
@@ -104,7 +123,7 @@ internal protocol ColumnWrapper: WrappedType {
 
     public init(wrappedValue: T) {
         _value = wrappedValue
-        state = Blackbird.Locked(ColumnState(hasChanged: true, lastUsedDatabase: nil))
+        state = Blackbird.Locked(BlackbirdColumnState(hasChanged: true))
     }
     
     public init(from decoder: Decoder) throws {
@@ -112,9 +131,9 @@ internal protocol ColumnWrapper: WrappedType {
         let value = try container.decode(T.self)
         _value = value
         if let sqliteDecoder = decoder as? BlackbirdSQLiteDecoder {
-            state = Blackbird.Locked(ColumnState(hasChanged: false, lastSavedValue: value, lastUsedDatabase: sqliteDecoder.database))
+            state = Blackbird.Locked(BlackbirdColumnState(hasChanged: false, lastSavedValue: value, lastUsedDatabaseID: sqliteDecoder.databaseID))
         } else {
-            state = Blackbird.Locked(ColumnState(hasChanged: true, lastUsedDatabase: nil))
+            state = Blackbird.Locked(BlackbirdColumnState(hasChanged: true))
         }
     }
     
